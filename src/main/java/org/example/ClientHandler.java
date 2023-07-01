@@ -4,11 +4,13 @@ import java.io.*;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 public class ClientHandler implements Runnable {
 
     public static ArrayList<ClientHandler> clientHandlers = new ArrayList<>();
-    private Socket socket;
+    private Socket controlSocket;
+    private Socket dataSocket;
     private DataInputStream dataInputStream;
     private DataOutputStream dataOutputStream;
     private BufferedReader bufferedReader;
@@ -16,17 +18,21 @@ public class ClientHandler implements Runnable {
     private String username;
     private String password;
     private static final String CLIENTS = "clients.txt";
-    private static final List<String> availableExtensions = List.of(".jpg", ".png", ".jpeg", ".txt");
+    private static final List<String> availableExtensions = List.of(".jpg", ".png", ".jpeg", ".txt", ".pdf");
     private boolean isLoggedIn = false;
+    private ArrayList<File> clientFiles = new ArrayList<>();
 
 
-    public ClientHandler(Socket socket) {
-        this.socket = socket;
+    public ClientHandler(Socket controlSocket, Socket dataSocket) {
+        this.controlSocket = controlSocket;
+        this.dataSocket = dataSocket;
+
         try {
-            this.dataInputStream = new DataInputStream(socket.getInputStream());
-            this.dataOutputStream = new DataOutputStream(socket.getOutputStream());
-            this.bufferedReader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            this.bufferedWriter = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+            this.dataInputStream = new DataInputStream(dataSocket.getInputStream());
+            this.dataOutputStream = new DataOutputStream(dataSocket.getOutputStream());
+
+            this.bufferedReader = new BufferedReader(new InputStreamReader(controlSocket.getInputStream()));
+            this.bufferedWriter = new BufferedWriter(new OutputStreamWriter(controlSocket.getOutputStream()));
 
             clientHandlers.add(this);
 
@@ -34,86 +40,180 @@ public class ClientHandler implements Runnable {
             this.password = bufferedReader.readLine();
 
             if (!isClientValid(username, password)) {
-                throw new IOException("Invalid credentials!");
-            }
+                String errResponseMsg = "530 Login Failed!";
 
-            System.out.println("USERNAME: " + username);
-            System.out.println("PASSWORD: " + password);
+                sendResponse(errResponseMsg);
+                throw new IOException(errResponseMsg);
+            }
         } catch (IOException e) {
             System.out.println(e.getMessage());
-            disconnectClient(socket, dataInputStream, dataOutputStream, bufferedReader, bufferedWriter);
+            disconnectClient(this.controlSocket, this.dataSocket, dataInputStream, dataOutputStream, bufferedReader, bufferedWriter);
         }
     }
 
     @Override
     public void run() {
-        ArrayList<File> clientFiles = new ArrayList<>();
-        File uploadedFile;
-        String msg;
-
-        while (socket.isConnected()) {
+        while (controlSocket.isConnected()) {
             try {
                 if (!isLoggedIn) {
                     // we get here after successfully login
-                    sendResponse("230");
+                    sendResponse("230 Successfully LoggedIn");
                     isLoggedIn = true;
-                }
+                } else {
+                    String clientRequest = bufferedReader.readLine();
+                    System.out.println("Request received " + clientRequest);
 
-                int fileNameLength = dataInputStream.readInt();
+                    if (clientRequest.equalsIgnoreCase("list")) {
+                        listFiles();
+                    }
 
-                if (fileNameLength > 0) {
-                    byte[] fileNameBytes = new byte[fileNameLength];
-                    dataInputStream.readFully(fileNameBytes, 0, fileNameLength);  // we read whole file
-                    String fileName = new String(fileNameBytes);
+                    if (clientRequest.equalsIgnoreCase("stor")) {
+                        getFileFromClient();
+                    }
 
-                    int fileContentLength = dataInputStream.readInt();
+                    if (clientRequest.equalsIgnoreCase("retr")) {
+                        String fileName = bufferedReader.readLine();
+                        System.out.println("Name of downloaded file: " + fileName);
+                        File dir = new File(username.trim());
 
-                    if (fileContentLength > 0) {
-                        byte[] fileContentBytes = new byte[fileContentLength];
-                        dataInputStream.readFully(fileContentBytes, 0, fileContentLength);
+                        if (dir.exists()) {
+                            File[] files = dir.listFiles();
 
-                        System.out.println("FILE RECEIVED");
+                            for (File file : files) {
+                                if (fileName.equals(file.getName())) {
+                                    sendFileToClient(file);
 
-                        String extension = fileName.substring(fileName.lastIndexOf(".")).toLowerCase();
-                        if (availableExtensions.contains(extension)) {
-                            System.out.println("PRZESLANY PLIK: " + fileName);
-                            File dir = new File(username.trim());
-                            if (!dir.exists()) {
-                                dir.mkdirs();
-                            }
-
-                            // save file on server
-                            File fileToSave = new File(dir.getAbsolutePath() + "/" + fileName);
-                            if (fileToSave.exists()) {
-                                String fileNameWithoutExtension = fileName.substring(0, fileName.lastIndexOf("."));
-                                int numberOfFiles = 0;
-                                for (File file: dir.listFiles()) {
-                                    if (file.getName().contains(fileNameWithoutExtension)) {
-                                        numberOfFiles++;
-                                    }
+                                    sendResponse("226 Transfer Completed");
                                 }
-                                fileToSave.renameTo(new File(dir.getAbsolutePath() + "/" + fileNameWithoutExtension
-                                        + "(" + numberOfFiles + ")" + extension));
                             }
-                            FileOutputStream fileOutputStream = new FileOutputStream(fileToSave);
-                            fileOutputStream.write(fileContentBytes);
-                            fileOutputStream.close();
+                        }
+                    }
 
-                            clientFiles.add(fileToSave);
+                    if (clientRequest.equalsIgnoreCase("dele")) {
+                        String fileName = bufferedReader.readLine();
+                        System.out.println("Name to delete: " + fileName);
+
+                        File dir = new File(username.trim());
+
+                        if (dir.exists()) {
+                            File[] files = dir.listFiles();
+
+                            for (File file : files) {
+                                if (fileName.equals(file.getName())) {
+                                    file.delete();
+                                    clientFiles.remove(file);
+                                    sendResponse("250 File Deleted");
+                                }
+                            }
                         }
                     }
                 }
+
             } catch (IOException e) {
-                disconnectClient(socket, dataInputStream, dataOutputStream, bufferedReader, bufferedWriter);
+                disconnectClient(controlSocket, dataSocket, dataInputStream, dataOutputStream, bufferedReader, bufferedWriter);
                 break;
             }
         }
     }
 
-    private void disconnectClient(Socket socket, DataInputStream dataInputStream, DataOutputStream dataOutputStream,
+    private void getFileFromClient() throws IOException {
+        int fileNameLength = dataInputStream.readInt();
+
+        if (fileNameLength > 0) {
+            byte[] fileNameBytes = new byte[fileNameLength];
+            dataInputStream.readFully(fileNameBytes, 0, fileNameLength);
+            String fileName = new String(fileNameBytes);  // decode file name from bytes to string
+
+            int fileContentLength = dataInputStream.readInt();
+
+            if (fileContentLength > 0) {
+                byte[] fileContentBytes = new byte[fileContentLength];
+                dataInputStream.readFully(fileContentBytes, 0, fileContentLength); // we read whole file
+
+                System.out.println("FILE RECEIVED");
+
+                String extension = fileName.substring(fileName.lastIndexOf(".")).toLowerCase();
+                if (availableExtensions.contains(extension)) {
+                    System.out.println("SENT FILE NAME: " + fileName);
+                    File dir = new File(username.trim());
+                    if (!dir.exists()) {
+                        dir.mkdirs();
+                    }
+
+                    // save file on server
+                    File fileToSave = new File(dir.getAbsolutePath() + "/" + fileName);
+                    if (fileToSave.exists()) {
+                        String fileNameWithoutExtension = fileName.substring(0, fileName.lastIndexOf("."));
+                        int numberOfFiles = 0;
+                        for (File file : Objects.requireNonNull(dir.listFiles())) {
+                            if (file.getName().contains(fileNameWithoutExtension)) {
+                                numberOfFiles++;
+                            }
+                        }
+                        String newName = renameFile(extension, dir, fileNameWithoutExtension, numberOfFiles);
+                        fileToSave.renameTo(new File(newName));
+                    }
+                    FileOutputStream fileOutputStream = new FileOutputStream(fileToSave);
+                    fileOutputStream.write(fileContentBytes);
+                    fileOutputStream.close();
+
+                    clientFiles.add(fileToSave);
+
+                    sendResponse("226 File On Server");
+                }
+            }
+        }
+    }
+
+    private static String renameFile(String extension, File dir, String fileNameWithoutExtension, int numberOfFiles) {
+        return new StringBuilder(dir.getAbsolutePath())
+                .append("/")
+                .append(fileNameWithoutExtension)
+                .append("(").append(numberOfFiles).append(")").append(extension).toString();
+    }
+
+    private void listFiles() throws IOException {
+        File dir = new File(username.trim());
+        if (dir.exists()) {
+            File[] files = dir.listFiles();
+
+            if (files != null) {
+                dataOutputStream.writeInt(files.length);
+
+                for (File file : files) {
+                    sendFileToClient(file);
+                }
+
+                sendResponse("226 Files Sent");  // files loaded
+            }
+        }
+    }
+
+    private void sendFileToClient(File file) {
+        try {
+            FileInputStream fileInputStream = new FileInputStream(file.getAbsolutePath());
+
+            byte[] fileNameBytes = file.getName().getBytes();
+            byte[] fileContent = new byte[(int) file.length()];
+
+            fileInputStream.read(fileContent);  // now we have our file in this stream
+            fileInputStream.close();
+
+            dataOutputStream.writeInt(fileNameBytes.length);  // we are telling server size of sending data
+            dataOutputStream.write(fileNameBytes);
+
+            dataOutputStream.writeInt(fileContent.length);
+            dataOutputStream.write(fileContent);
+        } catch (IOException e) {
+            System.out.println(e.getMessage());
+        }
+    }
+
+    private void disconnectClient(Socket controlSocket, Socket dataSocket, DataInputStream dataInputStream, DataOutputStream dataOutputStream,
                                   BufferedReader bufferedReader, BufferedWriter bufferedWriter) {
         try {
-            if (socket != null) socket.close();
+            if (controlSocket != null) this.controlSocket.close();
+            if (dataSocket != null) this.dataSocket.close();
             if (dataInputStream != null) this.dataInputStream.close();
             if (dataOutputStream != null) this.dataOutputStream.close();
             if (bufferedReader != null) this.bufferedReader.close();
@@ -147,7 +247,7 @@ public class ClientHandler implements Runnable {
             bufferedWriter.flush();
             System.out.println("RESPONSE SENT " + response);
         } catch (IOException e) {
-            disconnectClient(socket, dataInputStream, dataOutputStream, bufferedReader, bufferedWriter);
+            disconnectClient(controlSocket, dataSocket, dataInputStream, dataOutputStream, bufferedReader, bufferedWriter);
         }
     }
 }

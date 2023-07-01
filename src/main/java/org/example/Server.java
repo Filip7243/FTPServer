@@ -6,19 +6,24 @@ import java.net.Socket;
 
 public class Server {
 
-    private ServerSocket serverSocket;
+    private ServerSocket serverControlSocket;
+    private ServerSocket serverDataSocket;
 
-    public Server(ServerSocket serverSocket) {
-        this.serverSocket = serverSocket;
+    public Server(ServerSocket serverSocket, ServerSocket serverDataSocket) {
+        this.serverControlSocket = serverSocket;
+        this.serverDataSocket = serverDataSocket;
     }
 
     public void startServer() {
         try {
-            while (!serverSocket.isClosed()) {
-                Socket socket = serverSocket.accept();  // lock, waiting for new user, then released
+            while (!serverControlSocket.isClosed()) {
+                System.out.println("Waiting for clients...");
+                Socket controleSocket = serverControlSocket.accept();  // lock, waiting for new user, then released
                 System.out.println("New client connected!");
+                Socket dataSocket = serverDataSocket.accept();
+                System.out.println("DATA CHANEL OPENED!");
 
-                ClientHandler clientHandler = new ClientHandler(socket);
+                ClientHandler clientHandler = new ClientHandler(controleSocket, dataSocket);
                 Thread thread = new Thread(clientHandler);
                 thread.start();
             }
@@ -30,7 +35,7 @@ public class Server {
 
     private void closeServerSocket() {
         try {
-            if (serverSocket != null) serverSocket.close();
+            if (serverControlSocket != null) serverControlSocket.close();
         } catch (IOException e) {
             e.printStackTrace();
         }
