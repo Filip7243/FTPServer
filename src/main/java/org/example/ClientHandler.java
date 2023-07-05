@@ -18,7 +18,7 @@ public class ClientHandler implements Runnable {
     private String username;
     private String password;
     private static final String CLIENTS = "clients.txt";
-    private static final List<String> availableExtensions = List.of(".jpg", ".png", ".jpeg", ".txt", ".pdf");
+    private static final List<String> availableExtensions = List.of(".jpg", ".png", ".jpeg", ".txt", ".pdf", ".iso");
     private boolean isLoggedIn = false;
     private ArrayList<File> clientFiles = new ArrayList<>();
 
